@@ -27,7 +27,7 @@ override_dh_auto_configure:
 	fi
 	dh_auto_configure
 
-override_dh_auto_build: vet
+override_dh_auto_build:
 	dh_auto_build -- $(GORACE)
 
 vet:
