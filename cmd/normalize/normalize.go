@@ -150,13 +150,58 @@ func NormalizeNumber(token string) string {
 	return fmt.Sprintf("%d", number)
 }
 
+// parseIPv4Decimal parses a dotted-quad IPv4 address whose octets may carry
+// leading zeros, interpreting every octet as decimal.
+//
+// net.ParseIP used to accept this form, but Go 1.17 made it reject any octet
+// with a leading zero (CVE-2021-29923): "010" is octal 8 to some parsers and
+// decimal 10 to others, and the disagreement is exploitable. Go removed the
+// ambiguity by refusing the input outright.
+//
+// DANOS has always accepted the leading-zero form on the CLI and normalized
+// it as decimal, so that behaviour is kept here — but stated explicitly rather
+// than inherited from whatever the standard library happened to do. Without
+// this, NormalizeIPv4 silently returns its input unchanged and unnormalized
+// values reach the config.
+func parseIPv4Decimal(s string) net.IP {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return nil
+	}
+	var b [4]byte
+	for i, p := range parts {
+		if p == "" || len(p) > 3 {
+			return nil
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return nil
+			}
+		}
+		n, err := strconv.ParseUint(p, 10, 16)
+		if err != nil || n > 255 {
+			return nil
+		}
+		b[i] = byte(n)
+	}
+	return net.IPv4(b[0], b[1], b[2], b[3])
+}
+
+// parseIPv4 accepts everything net.ParseIP does, plus the leading-zero form.
+func parseIPv4(s string) net.IP {
+	if ip := net.ParseIP(s); ip != nil {
+		return ip
+	}
+	return parseIPv4Decimal(s)
+}
+
 func NormalizeIPv4(token string) string {
 
 	if strings.Contains(token, ":") {
 		return token
 	}
 
-	if ip := net.ParseIP(token); ip != nil {
+	if ip := parseIPv4(token); ip != nil {
 		return ip.String()
 	}
 
@@ -193,7 +238,7 @@ func NormalizeIPv4prefix(token string) string {
 	addr_string := token[:i]
 	mask_string := token[i+1:]
 
-	addr := net.ParseIP(addr_string)
+	addr := parseIPv4(addr_string)
 	if addr == nil {
 		return token
 	}
