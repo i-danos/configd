@@ -7,7 +7,7 @@ Build-Depends:
  dh-vci,
  dh-yang,
  golang (>= 1.10),
- golang-dbus-dev,
+ golang-github-godbus-dbus-dev,
  golang-github-danos-config-dev (>= 1.7),
  golang-github-danos-encoding-rfc7951-dev (>= 0.5),
  golang-github-danos-mgmterror-dev (>= 1:1.6),

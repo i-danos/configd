@@ -1,3 +1,10 @@
+configd (2.12.2danos1) unstable; urgency=medium
+
+  * debian/control: golang-dbus-dev renamed to golang-github-godbus-dbus-dev
+    (see golang-github-godbus-dbus's own changelog for why).
+
+ -- DANOS <noreply@danos.io>  Mon, 28 Sep 2026 09:15:00 +0800
+
 configd (2.12.2) unstable; urgency=medium
 
   * Fix over-optimised leafref allowed values cacheing.
