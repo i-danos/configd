@@ -1,3 +1,19 @@
+configd (2.12.2danos2) unstable; urgency=medium
+
+  * debian/control: drop the golang-github-godbus-dbus-dev Build-Depends
+    entirely. configd's own source never imports godbus/dbus directly (the
+    only consumers were golang-github-danos-config-dev and
+    golang-github-danos-vci-dev, both of which now vendor their own copy of
+    the fork privately rather than exposing it), so this had become a
+    vestigial Build-Depends. Left in place, it forced configd's build root
+    to hold both the fork and Debian's real golang-dbus-dev v5 (pulled in
+    transitively via golang-go-systemd-dev) at once, which cannot coexist:
+    "dpkg: trying to overwrite '.../godbus/dbus/auth.go', which is also in
+    package golang-dbus-dev (5.1.0-1)". Verified locally: `go build ./...`
+    passes against the updated config-dev and vci-dev trees.
+
+ -- DANOS <noreply@danos.io>  Mon, 28 Sep 2026 11:45:00 +0800
+
 configd (2.12.2danos1) unstable; urgency=medium
 
   * debian/control: golang-dbus-dev renamed to golang-github-godbus-dbus-dev
