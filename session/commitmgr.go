@@ -98,6 +98,7 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 
 	var run *data.Node
 
+	firstCommit := !m.hadcommit
 	if !m.hadcommit {
 		// Very first commit. To ensure that defaults values
 		// are configured, set running tree with no defaults
@@ -121,6 +122,10 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 	ctx.LogCommitMsg("Starting validation and commit")
 	outs, errs, ok := ctx.validate()
 	if !ok {
+		if firstCommit {
+			// Nothing was committed: the next attempt is still the first.
+			m.hadcommit = false
+		}
 		return &commitresp{out: outs, err: errs, ok: ok}
 	}
 
@@ -133,6 +138,9 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 		err := mgmterror.NewOperationFailedApplicationError()
 		err.Message = "Could not lookup UID"
 		errs = append(errs, err)
+		if firstCommit {
+			m.hadcommit = false
+		}
 		return &commitresp{out: outs, err: errs, ok: false}
 	}
 	env = append(env, "COMMIT_USER="+user.Username)
@@ -150,9 +158,35 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 	var couts []*exec.Output
 	var cerrs []error
 	changedNSMap := diff.CreateChangedNSMap(mcan, run, m.schema, nil)
-	couts = sctx.CompMgr.ComponentSetRunningWithLog(
+	checkedCompMgr, supported := sctx.CompMgr.(schema.CheckedComponentManager)
+	if !supported {
+		err := mgmterror.NewOperationFailedApplicationError()
+		err.Message = "Component manager does not support fail-closed configuration application"
+		errs = append(errs, err)
+		if firstCommit {
+			m.hadcommit = false
+		}
+		ctx.LogCommitTime("Commit OVERALL", commitStart)
+		return &commitresp{out: outs, err: errs, ok: false}
+	}
+	couts, compErrs := checkedCompMgr.ComponentSetRunningChecked(
 		m.schema, ucan, changedNSMap, ctx.LogCommitTime)
 	outs = append(outs, couts...)
+	if len(compErrs) > 0 {
+		// A component failed to apply the configuration. Fail closed: do not
+		// run the commit scripts, do not store or write the running config
+		// and do not run post-hooks. The candidate is kept (the session only
+		// resets it on success). Components applied before the failure are
+		// NOT rolled back; the error text names them and says whether the
+		// failing component's outcome is unknown.
+		errs = append(errs, compErrs...)
+		if firstCommit {
+			// Nothing was committed: the next attempt is still the first.
+			m.hadcommit = false
+		}
+		ctx.LogCommitTime("Commit OVERALL", commitStart)
+		return &commitresp{out: outs, err: errs, ok: false}
+	}
 
 	couts, cerrs, _ = ctx.commit(&env)
 	outs = append(outs, couts...)
