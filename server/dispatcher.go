@@ -82,6 +82,9 @@ type Disp struct {
 	ms     schema.ModelSet
 	msFull schema.ModelSet
 	ctx    *configd.Context
+	// configMgmtScript overrides the commit-confirm timer script; empty means
+	// the installed one. Set by tests only (exports_for_test.go).
+	configMgmtScript string
 }
 
 func (d *Disp) GetConfigSystemFeatures() (map[string]struct{}, error) {
@@ -998,7 +1001,11 @@ func (d *Disp) setConfirmedCommitTimeout(cmt *commitInfo) (string, error) {
 	return string(out), err
 }
 func (d *Disp) setConfirmTimeout(mins int) (string, error) {
-	cmd := spawn.Command("/opt/vyatta/sbin/vyatta-config-mgmt.pl",
+	script := "/opt/vyatta/sbin/vyatta-config-mgmt.pl"
+	if d.configMgmtScript != "" {
+		script = d.configMgmtScript
+	}
+	cmd := spawn.Command(script,
 		"--action=commit-confirm",
 		fmt.Sprintf("--minutes=%d", mins))
 	out, err := cmd.CombinedOutput()
@@ -1042,6 +1049,37 @@ func (d *Disp) Commit(
 
 	return d.accountCmdWrapStrErr(cmdArgs, func() (interface{}, error) {
 		return d.commitInternal(sid, message, debug, 0, false)
+	})
+}
+
+// Reconcile re-applies the running configuration to the dirty components
+// (design 7.1). It is authorised and accounted as "commit reconcile", ignores
+// the candidate, does not enter commitInternal and is serialised with commits
+// by the CommitMgr loop ("Commit already in progress"). A component that stays
+// dirty is text in the reply, not an error.
+func (d *Disp) Reconcile(sid string, debug bool) (string, error) {
+	cmdArgs := d.newCommandArgsForAaa("commit", []string{"reconcile"}, nil)
+
+	return d.accountCmdWrapStrErr(cmdArgs, func() (interface{}, error) {
+		if _, err := d.smgr.Get(d.ctx, sid); err != nil {
+			return "", err
+		}
+		outs, err := d.cmgr.ReconcileSerialised(d.ctx)
+		var rpcout bytes.Buffer
+		for _, out := range outs {
+			if out == nil {
+				continue
+			}
+			if out.Path != nil {
+				rpcout.WriteString(fmt.Sprint(out.Path))
+				rpcout.WriteByte('\n')
+			}
+			if out.Output != "" {
+				rpcout.WriteString(out.Output)
+				rpcout.WriteByte('\n')
+			}
+		}
+		return rpcout.String(), err
 	})
 }
 

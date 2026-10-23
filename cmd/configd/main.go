@@ -360,6 +360,17 @@ func main() {
 		SecretsGroup: *secretsgroup,
 		SuperGroup:   *supergroup,
 		Capabilities: *capabilities,
+		// The model -> service pair is the one the component mappings are
+		// built from (schema.getOrderedComponentsList): ServiceConfig.Name
+		// serves ModelByModelSet[modelSet].Name.
+		ServiceUnitFor: func(model string) string {
+			for _, c := range compConfig {
+				if m := c.ModelByModelSet[VyattaV1ModelSet]; m != nil && m.Name == model {
+					return c.Name
+				}
+			}
+			return ""
+		},
 	}
 
 	compMgr := schema.NewCompMgr(
@@ -377,6 +388,12 @@ func main() {
 	// it is cleaned up immediately.
 	runtime.GC()
 	debug.FreeOSMemory()
+
+	// Startup reconcile (design 6.4 item 3): once, before accepting clients. An
+	// error is logged; the pass has finished the commit gate either way.
+	if err := srv.RunStartup(); err != nil {
+		elog.Println("startup reconcile:", err)
+	}
 
 	fatal(srv.Serve())
 }

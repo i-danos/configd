@@ -7,6 +7,10 @@
 package server
 
 import (
+	"io/ioutil"
+	"os"
+	"sync"
+
 	"github.com/danos/config/schema"
 	"github.com/danos/configd"
 	"github.com/danos/configd/session"
@@ -27,6 +31,28 @@ func (d *Disp) SchemaGetUnescaped(modOrSubmod string) (string, error) {
 	return schema, nil
 }
 
+var (
+	stubOnce sync.Once
+	stubPath string
+)
+
+// stubConfigMgmtScript returns a stand-in for vyatta-config-mgmt.pl (shipped
+// by vyatta-cfg-system, absent from unit-test environments) that accepts the
+// commit-confirm action, so dispatcher tests do not depend on the host.
+func stubConfigMgmtScript() string {
+	stubOnce.Do(func() {
+		f, err := ioutil.TempFile("", "stub-config-mgmt-*.sh")
+		if err != nil {
+			return
+		}
+		f.WriteString("#!/bin/sh\nexit 0\n")
+		f.Close()
+		os.Chmod(f.Name(), 0700)
+		stubPath = f.Name()
+	})
+	return stubPath
+}
+
 func NewDispatcher(
 	smgr *session.SessionMgr,
 	cmgr *session.CommitMgr,
@@ -40,5 +66,16 @@ func NewDispatcher(
 		ms:     ms,
 		msFull: msFull,
 		ctx:    ctx,
+
+		configMgmtScript: stubConfigMgmtScript(),
 	}
+}
+
+// MethodNames lists the methods the registrar built by NewSrv exposes.
+func (s *Srv) MethodNames() []string {
+	var names []string
+	for n := range s.m {
+		names = append(names, n)
+	}
+	return names
 }
