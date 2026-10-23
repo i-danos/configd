@@ -1,3 +1,27 @@
+configd (2.12.2danos5) unstable; urgency=medium
+
+  * session: durable commit journal (/var/run/vyatta/configd/commit-state.json)
+    with commit record, per-component dispatch records and dirty classes
+    (unknown, unsettled, unfenced, crash_window, compensation_failed,
+    unverified, boot_partial, blocked). A journal write failure keeps the
+    dirty state in memory (UpdateKeepDirty) instead of losing it.
+  * session: fence gate for ordinary commit, reconcile and startup, using
+    the service identity and monotonic clock; startup recovery consumes a
+    stale commit record in one atomic write; runfile persistence is atomic
+    and the failure matrix is covered by fault-injection tests.
+  * server, client, cfgcli: new Reconcile RPC and "reconcile" command that
+    re-apply the running configuration to dirty components; authorised and
+    accounted as "commit reconcile". Commits report an independent dirty
+    component as a warning with a hint to run reconcile.
+  * server: the commit-confirm timer script is overridable in the
+    dispatcher so unit tests no longer need vyatta-config-mgmt.pl; this
+    fixes three commit-confirm tests that failed on hosts without it.
+  * Tests for journal, fence, recovery, startup, reconcile and the RPC.
+  * Version note: danos3 and danos4 were intermediate local builds and were
+    never published.
+
+ -- i-danos dev <dev@i-danos.dev>  Fri, 23 Oct 2026 12:00:00 -0700
+
 configd (2.12.2danos2) unstable; urgency=medium
 
   * debian/control: drop the golang-github-godbus-dbus-dev Build-Depends
