@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -44,11 +45,25 @@ type failingOps struct {
 	results map[string]error
 	calls   []string
 	applied map[string]string // config each component actually accepted
+	// payloads: the config string of every call, in order, per component.
+	payloads map[string][]string
+	// failOnce: the scripted error applies to the first call of a component
+	// only; later calls to it succeed.
+	failOnce bool
+	seen     map[string]int
 }
 
 func (f *failingOps) SetConfigForModel(model string, obj interface{}) error {
 	f.calls = append(f.calls, model)
-	if err := f.results[model]; err != nil {
+	if f.payloads == nil {
+		f.payloads = map[string][]string{}
+		f.seen = map[string]int{}
+	}
+	if s, ok := obj.(string); ok {
+		f.payloads[model] = append(f.payloads[model], s)
+	}
+	f.seen[model]++
+	if err := f.results[model]; err != nil && (!f.failOnce || f.seen[model] == 1) {
 		return err
 	}
 	if f.applied == nil {
@@ -99,6 +114,9 @@ func commitWithFailures(t *testing.T, fail map[string]error) *commitOutcome {
 func commitScenario(t *testing.T, ts *sessiontest.TestSpec, cfg string,
 	fail map[string]error) *commitOutcome {
 	srv, sess := ts.Init()
+	// Keep the running file (and the commit journal next to it) out of the
+	// source tree.
+	srv.Ctx.Config.Runfile = filepath.Join(t.TempDir(), "session_test.runfile")
 
 	tcm := ts.GetCompMgr()
 	ops := &failingOps{OperationsManager: tcm, results: fail}
@@ -251,7 +269,10 @@ func TestCommitComponentFailureStopsLaterComponentsAndReportsPartialState(t *tes
 	msg := fmt.Sprint(r.errs)
 	for _, need := range []string{
 		compThird,
-		"already applied and NOT rolled back: " + compSecond,
+		// the real compMgr now takes the compensating path; its report
+		// (here: compensation skipped by policy on the first commit) names
+		// the components whose state may differ from running
+		"The runtime state of: " + compSecond + ", " + compThird + " may differ",
 		"not attempted: " + compFirst} {
 		if !strings.Contains(msg, need) {
 			t.Errorf("error lacks %q: %s", need, msg)

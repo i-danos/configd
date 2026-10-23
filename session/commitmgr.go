@@ -30,6 +30,12 @@ type commitmgrreq struct {
 	message string
 	debug   bool
 	resp    chan *commitresp
+	// reconcile: run the internal reconcile apply instead of a commit (it goes
+	// through the same loop, so it shares the in-progress rule).
+	reconcile bool
+	// startup: run the startup pass (StartupPass) through the same loop; it is
+	// checked before reconcile, and only StartupSerialised sets it.
+	startup bool
 }
 
 type commitresp struct {
@@ -44,6 +50,18 @@ type CommitMgr struct {
 	schema    schema.ModelSet
 	reqch     chan commitmgrreq
 	hadcommit bool
+
+	// Stage 3-B2: the commit journal and the dispatch recorder, used only when
+	// the component manager implements schema.CompensatingComponentManager.
+	// Opened on first use (journalFor); the fields are seams for tests.
+	journal     *Journal
+	recorder    schema.DispatchRecorder
+	openJournal func(path string) (*Journal, error)
+	runfileFS   journalFS      // nil: the real file system
+	identities  IdentityReader // nil: systemd
+	startup     startupGate    // opt-in commit gate, disarmed by default
+	// crashSettle: opt-in startup prelude (design 6.4); nil = disarmed.
+	crashSettle func(time.Duration)
 }
 
 func NewCommitMgr(running *data.AtomicNode, schema schema.ModelSet) *CommitMgr {
@@ -129,6 +147,18 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 		return &commitresp{out: outs, err: errs, ok: ok}
 	}
 
+	// Opt-in startup gate (design 6.4 item 3): disarmed unless a test arms it.
+	// Nothing was sent and no hook ran yet.
+	if gerr := m.startup.refusal(); gerr != nil {
+		e := mgmterror.NewOperationFailedApplicationError()
+		e.Message = gerr.Error()
+		errs = append(errs, e)
+		if firstCommit {
+			m.hadcommit = false
+		}
+		return &commitresp{out: outs, err: errs, ok: false}
+	}
+
 	// Create environment for hooks
 	commitStart := time.Now()
 	env := make([]string, 0)
@@ -146,6 +176,28 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 	env = append(env, "COMMIT_USER="+user.Username)
 	env = append(env, "PATH=/bin:/usr/bin:/sbin:/usr/sbin:/opt/vyatta/bin:/opt/vyatta/sbin")
 
+	// Fence gate (design 6.4, ordinary commit): before the pre-hooks, W1 and
+	// any component call. Journaled path only; reads the journal, writes nothing.
+	changedNSMap := diff.CreateChangedNSMap(mcan, run, m.schema, nil)
+	var forced, soft []string
+	if _, isComp := sctx.CompMgr.(schema.CompensatingComponentManager); isComp {
+		var ferrs []error
+		if forced, ferrs = m.fenceCheck(sctx, changedNSMap); len(ferrs) > 0 {
+			errs = append(errs, ferrs...)
+			if firstCommit {
+				m.hadcommit = false
+			}
+			ctx.LogCommitTime("Commit OVERALL", commitStart)
+			outs = append(outs, m.reconcileHint()...)
+			return &commitresp{out: outs, err: errs, ok: false}
+		}
+		// Dirty independent components: opportunistic repair when fenced,
+		// a warning otherwise (design 7.2 item 5); never a refusal.
+		var swarns []*exec.Output
+		soft, swarns = m.opportunisticPlan(sctx, changedNSMap)
+		outs = append(outs, swarns...)
+	}
+
 	// Run pre-hooks
 	hout, herr := ctx.execute_hooks("/etc/commit/pre-hooks.d", env)
 	outs = append(outs, hout)
@@ -157,35 +209,56 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 	// Can't use AppendOutput because ctx.commit signature is different
 	var couts []*exec.Output
 	var cerrs []error
-	changedNSMap := diff.CreateChangedNSMap(mcan, run, m.schema, nil)
-	checkedCompMgr, supported := sctx.CompMgr.(schema.CheckedComponentManager)
-	if !supported {
-		err := mgmterror.NewOperationFailedApplicationError()
-		err.Message = "Component manager does not support fail-closed configuration application"
-		errs = append(errs, err)
-		if firstCommit {
-			m.hadcommit = false
+	var jr *compensatingResult
+	if comp, ok := sctx.CompMgr.(schema.CompensatingComponentManager); ok {
+		// Journaled path (design 11.2, steps 3-4): commit record, then the
+		// compensating apply with the dispatch recorder. Any failure ends the
+		// commit before the commit scripts, the running store, the runfile and
+		// the post-hooks.
+		cr := m.applyCompensating(comp, sctx, ctx, ucan, rtree, changedNSMap, forced, soft, firstCommit)
+		outs = append(outs, cr.outs...)
+		if cr.failed {
+			errs = append(errs, cr.errs...)
+			if firstCommit {
+				// Nothing was committed: the next attempt is still the first.
+				m.hadcommit = false
+			}
+			ctx.LogCommitTime("Commit OVERALL", commitStart)
+			outs = append(outs, m.reconcileHint()...)
+			return &commitresp{out: outs, err: errs, ok: false}
 		}
-		ctx.LogCommitTime("Commit OVERALL", commitStart)
-		return &commitresp{out: outs, err: errs, ok: false}
-	}
-	couts, compErrs := checkedCompMgr.ComponentSetRunningChecked(
-		m.schema, ucan, changedNSMap, ctx.LogCommitTime)
-	outs = append(outs, couts...)
-	if len(compErrs) > 0 {
-		// A component failed to apply the configuration. Fail closed: do not
-		// run the commit scripts, do not store or write the running config
-		// and do not run post-hooks. The candidate is kept (the session only
-		// resets it on success). Components applied before the failure are
-		// NOT rolled back; the error text names them and says whether the
-		// failing component's outcome is unknown.
-		errs = append(errs, compErrs...)
-		if firstCommit {
-			// Nothing was committed: the next attempt is still the first.
-			m.hadcommit = false
+		jr = cr
+	} else {
+		checkedCompMgr, supported := sctx.CompMgr.(schema.CheckedComponentManager)
+		if !supported {
+			err := mgmterror.NewOperationFailedApplicationError()
+			err.Message = "Component manager does not support fail-closed configuration application"
+			errs = append(errs, err)
+			if firstCommit {
+				m.hadcommit = false
+			}
+			ctx.LogCommitTime("Commit OVERALL", commitStart)
+			return &commitresp{out: outs, err: errs, ok: false}
 		}
-		ctx.LogCommitTime("Commit OVERALL", commitStart)
-		return &commitresp{out: outs, err: errs, ok: false}
+		couts, compErrs := checkedCompMgr.ComponentSetRunningChecked(
+			m.schema, ucan, changedNSMap, ctx.LogCommitTime)
+		outs = append(outs, couts...)
+		if len(compErrs) > 0 {
+			// A component failed to apply the configuration. Fail closed: do not
+			// run the commit scripts, do not store or write the running config
+			// and do not run post-hooks. The candidate is kept (the session only
+			// resets it on success). Components applied before the failure are
+			// NOT rolled back; the error text names them and says whether the
+			// failing component's outcome is unknown.
+			errs = append(errs, compErrs...)
+			if firstCommit {
+				// Nothing was committed: the next attempt is still the first.
+				m.hadcommit = false
+			}
+			ctx.LogCommitTime("Commit OVERALL", commitStart)
+			return &commitresp{out: outs, err: errs, ok: false}
+		}
+
 	}
 
 	couts, cerrs, _ = ctx.commit(&env)
@@ -195,9 +268,40 @@ func (m *CommitMgr) commit(sid string, sctx *configd.Context, candidate *data.No
 	writeStart := time.Now()
 	effective := m.effective.MergeTreeWithoutDefaults(ctx.ctx)
 	m.effective.Discard(ctx.ctx) //we got what we needed
-	m.running.Store(effective)
-	m.writeRunning(ctx.ctx)
-	ctx.LogCommitTime("Write config", writeStart)
+	if jr != nil {
+		// Journaled path (design 11.2, steps 6-8): render, persist, and only
+		// then store the new running tree; a persist failure compensates.
+		pouts, perrs, pfailed := m.persistJournaled(jr, sctx, ctx, effective)
+		outs = append(outs, pouts...)
+		if pfailed {
+			errs = append(errs, perrs...)
+			if firstCommit {
+				m.hadcommit = false
+			}
+			ctx.LogCommitTime("Write config", writeStart)
+			ctx.LogCommitTime("Commit OVERALL", commitStart)
+			outs = append(outs, m.reconcileHint()...)
+			return &commitresp{out: outs, err: errs, ok: false}
+		}
+		ctx.LogCommitTime("Write config", writeStart)
+		// W2: the commit record is cleared (unless persisted_unsynced was
+		// written) and the applied components are no longer dirty. A failure is
+		// reported, not hidden, and does not undo the successful apply.
+		if !jr.unsynced {
+			if err := journalFinish(jr.j, jr.id, jr.rep, true, ""); err != nil {
+				outs = append(outs, journalWarning("end of the commit", err))
+			}
+		}
+		// A successful commit that emitted a dirty-component warning says how
+		// to repair (design 2 and 7.1).
+		if hasDirtyWarning(outs) {
+			outs = append(outs, m.reconcileHint()...)
+		}
+	} else {
+		m.running.Store(effective)
+		m.writeRunning(ctx.ctx)
+		ctx.LogCommitTime("Write config", writeStart)
+	}
 
 	// Run post-hooks after we've written out the running cfg
 	postCmtHookStart := time.Now()
@@ -232,7 +336,22 @@ func (m *CommitMgr) run() {
 			}
 			inCommit = true
 			go func(r commitmgrreq) {
-				resp := m.commit(r.sid, r.ctx, r.t, r.message, r.debug)
+				var resp *commitresp
+				if r.startup {
+					outs, err := m.StartupPass(r.ctx)
+					resp = &commitresp{out: outs, ok: err == nil}
+					if err != nil {
+						resp.err = []error{err}
+					}
+				} else if r.reconcile {
+					outs, err := m.Reconcile(r.ctx)
+					resp = &commitresp{out: outs, ok: err == nil}
+					if err != nil {
+						resp.err = []error{err}
+					}
+				} else {
+					resp = m.commit(r.sid, r.ctx, r.t, r.message, r.debug)
+				}
 				donech <- done
 				r.resp <- resp
 			}(req)
@@ -253,6 +372,34 @@ func (m *CommitMgr) Commit(sid string, ctx *configd.Context, candidate *data.Nod
 		debug:   debug,
 	}
 	return <-respch
+}
+
+// ReconcileSerialised runs the internal reconcile apply (Reconcile) through the
+// commit loop: it is refused with "Commit already in progress" while a commit
+// (or another reconcile) runs, and it is the only way the RPC reaches Reconcile.
+func (m *CommitMgr) ReconcileSerialised(ctx *configd.Context) ([]*exec.Output, error) {
+	respch := make(chan *commitresp)
+	m.reqch <- commitmgrreq{ctx: ctx, resp: respch, reconcile: true}
+	resp := <-respch
+	if len(resp.err) > 0 {
+		return resp.out, resp.err[0]
+	}
+	return resp.out, nil
+}
+
+// StartupSerialised runs StartupPass through the commit loop: refused with
+// "Commit already in progress" while a commit, a reconcile or another startup
+// pass runs, and it is the entry the later main-wiring stage must call (not
+// StartupPass beside a running commit, not ReconcileSerialised, which keeps
+// calling Reconcile and therefore does not finish the startup gate).
+func (m *CommitMgr) StartupSerialised(ctx *configd.Context) ([]*exec.Output, error) {
+	respch := make(chan *commitresp)
+	m.reqch <- commitmgrreq{ctx: ctx, resp: respch, startup: true}
+	resp := <-respch
+	if len(resp.err) > 0 {
+		return resp.out, resp.err[0]
+	}
+	return resp.out, nil
 }
 
 func (m *CommitMgr) Running() *data.Node {
