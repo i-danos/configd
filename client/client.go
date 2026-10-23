@@ -380,6 +380,9 @@ func (c *Client) CommitConfirm(
 func (c *Client) Commit(message string, debug bool) (string, error) {
 	return c.callString(GetFuncName(), c.sid, message, debug)
 }
+func (c *Client) Reconcile(debug bool) (string, error) {
+	return c.callString(GetFuncName(), c.sid, debug)
+}
 func (c *Client) Discard() error {
 	return c.callBoolIgnore(GetFuncName(), c.sid)
 }

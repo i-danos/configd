@@ -42,6 +42,9 @@ type Srv struct {
 	Wlog       *log.Logger
 	Config     *configd.Config
 	CompMgr    schema.ComponentManager
+	// startCtx is the system context built in NewSrv for RUNNING and
+	// EFFECTIVE; RunStartup reuses it.
+	startCtx *configd.Context
 }
 
 func loadRunning(config *configd.Config, ms schema.ModelSet) *data.Node {
@@ -101,6 +104,7 @@ func NewSrv(
 		Elog:   s.Elog,
 		Wlog:   s.Wlog,
 	}
+	s.startCtx = ctx
 	s.smgr.Create(ctx, "RUNNING", s.cmgr, s.ms, s.msFull, session.Shared)
 	s.smgr.Lock(ctx, "RUNNING")
 
@@ -129,6 +133,24 @@ func NewSrv(
 		s.m[meth.Name] = meth
 	}
 	return s
+}
+
+// RunStartup arms the production startup gate and crashSettle and runs the
+// startup pass once through the commit loop (design 6.4 item 3). The caller
+// (main) runs it between NewSrv and Serve; an error is only reported, the
+// pass has finished the gate either way.
+func (s *Srv) RunStartup() error {
+	if s.startCtx.CompMgr == nil {
+		s.startCtx.CompMgr = s.CompMgr
+	}
+	s.cmgr.ArmProductionStartup(nil, nil)
+	outs, err := s.cmgr.StartupSerialised(s.startCtx)
+	for _, o := range outs {
+		if o != nil && o.Output != "" {
+			s.Dlog.Println("startup reconcile: " + o.Output)
+		}
+	}
+	return err
 }
 
 //Serve is the server main loop. It accepts connections and spawns a goroutine to handle that connection.

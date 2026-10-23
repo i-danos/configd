@@ -71,6 +71,12 @@ type Config struct {
 	SecretsGroup string
 	SuperGroup   string
 	Capabilities string
+
+	// ServiceUnitFor maps a component (model) name to its systemd service
+	// name. Built by cmd/configd from the component configuration; used to
+	// read the service identity recorded in the commit journal. May be nil
+	// (the identity is then recorded as unknown).
+	ServiceUnitFor func(model string) string
 }
 
 //version of syslog.NewLogger which uses base program name as logging tag

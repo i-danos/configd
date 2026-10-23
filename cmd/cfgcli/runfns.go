@@ -199,6 +199,22 @@ func commitRun(ctx *Ctx) {
 	os.Exit(0)
 }
 
+// reconcileRunInternal is the part of the reconcile command that talks to
+// configd; it is a seam for tests because reconcileRun exits the process. It
+// never looks at the candidate: an unchanged one is not an error here.
+func reconcileRunInternal(ctx *Ctx) (string, error) {
+	return ctx.Client.Reconcile(isCommitDebugOn())
+}
+
+func reconcileRun(ctx *Ctx) {
+	out, err := reconcileRunInternal(ctx)
+	handleErrorNoIndent("Reconcile", err)
+	if out != "" {
+		doSnippit(ctx, fmt.Sprintf("echo \"%s\"\n", out))
+	}
+	os.Exit(0)
+}
+
 func isCommitDebugOn() bool {
 	return os.ExpandEnv("$COMMIT_DEBUG") != ""
 }

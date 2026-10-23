@@ -36,6 +36,7 @@ type commander interface {
 	LoadFrom(source, routingInstance string) error
 	LoadKeys(user, source, routingInstance string) (string, error)
 	MergeReportWarnings(file string) (bool, error)
+	Reconcile(debug bool) (string, error)
 	Rollback(string, string, bool) (string, error)
 	Save(file string) error
 	SaveTo(dest, routingInstance string) error

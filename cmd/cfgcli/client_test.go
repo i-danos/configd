@@ -75,6 +75,10 @@ type testClient struct {
 	t              *testing.T
 	cfgSysFeatures map[string]struct{}
 	commitLog      map[string]string
+	// Reconcile: recorded calls and the canned result.
+	reconcileCalls []bool
+	reconcileOut   string
+	reconcileErr   error
 	Mocker
 }
 
@@ -102,6 +106,11 @@ func (tc *testClient) setCommitLog(numEntries int) *testClient {
 
 func (tc *testClient) CancelCommit(comment, persistid string, force, debug bool) (string, error) {
 	panic("Rollback testClient method not yet implemented")
+}
+
+func (tc *testClient) Reconcile(debug bool) (string, error) {
+	tc.reconcileCalls = append(tc.reconcileCalls, debug)
+	return tc.reconcileOut, tc.reconcileErr
 }
 
 func (tc *testClient) Commit(message string, debug bool) (string, error) {
