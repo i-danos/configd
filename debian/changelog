@@ -1,3 +1,24 @@
+configd (2.12.2danos6) unstable; urgency=medium
+
+  * session: test pause points P2 and P4 in the dispatch recorder, compiled
+    in but off by default. P2 stops after the dispatch record is durable and
+    before the Set is sent; P4 stops after the component replied and before
+    the record is marked settled. They let a test image stop configd at those
+    two points and kill it, which a real system could not hit
+    deterministically.
+  * The pause needs DANOS_TEST_HOOKS=1 in configd's environment AND a control
+    file /etc/danos/test-hooks/pause-p2 or pause-p4 naming the component; no
+    package ships either. With the variable unset the pause points are a nil
+    check: no stat, no open, no extra system call. With the variable set and
+    no control file the cost is one stat per pause point.
+  * The pause is bounded (default 10 s, at most 15 s), fires once per control
+    file, and a missing or wrong FIFO or a malformed control file lets the
+    commit continue at once. The hooks never write the journal and do not
+    change may_have_been_sent, settled or the fence verdicts; they only delay.
+  * Tests for the pause points, including the inert case.
+
+ -- i-danos dev <dev@i-danos.dev>  Mon, 26 Oct 2026 09:06:13 -0700
+
 configd (2.12.2danos5) unstable; urgency=medium
 
   * session: durable commit journal (/var/run/vyatta/configd/commit-state.json)
