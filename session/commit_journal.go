@@ -336,6 +336,9 @@ type JournalRecorder struct {
 	ids  IdentityReader
 	mono func() int64
 	logf func(format string, args ...interface{})
+	// hooks is nil unless DANOS_TEST_HOOKS=1 (commit_journal_hooks.go); a nil
+	// hooks makes both test pause points a no-op.
+	hooks *testHooks
 }
 
 var _ schema.DispatchRecorder = (*JournalRecorder)(nil)
@@ -346,7 +349,8 @@ func NewJournalRecorder(j *Journal, ids IdentityReader, mono func() int64) *Jour
 	if mono == nil {
 		mono = schema.MonotonicNowUs
 	}
-	return &JournalRecorder{j: j, ids: ids, mono: mono, logf: j.logf}
+	return &JournalRecorder{j: j, ids: ids, mono: mono, logf: j.logf,
+		hooks: hooksFromEnv(os.Getenv, j.logf)}
 }
 
 // BeforeDispatch reads the service identity of the component, samples the
@@ -391,6 +395,8 @@ func (r *JournalRecorder) BeforeDispatch(
 	}); err != nil {
 		return 0, err
 	}
+	// Test pause point P2: the record is durable, nothing has been sent.
+	r.hooks.pause(hookP2, component, kind, seq, nil)
 	return t, nil
 }
 
@@ -404,6 +410,8 @@ func (r *JournalRecorder) AfterDispatch(
 	seq uint64,
 	callErr error,
 ) {
+	// Test pause point P4: the reply is in, the record is not yet settled.
+	r.hooks.pause(hookP4, component, kind, seq, callErr)
 	err := r.j.Update(func(s *JournalState) bool {
 		d, ok := s.Dispatch[component]
 		if !ok || d.Seq != seq || d.Kind != kind || d.Settled {
