@@ -25,6 +25,20 @@
 // allocation. The hooks never write the journal, never change a payload, an
 // error or an outcome; they only delay.
 //
+// When a pause starts the hook also leaves a marker file, so an observer can tell
+// which seam configd is parked at, and for P4 that the component had already
+// answered, without reading journald (which does not survive under TCG):
+//
+//	<control dir>/state/<seam>-<component>-<seq>.hit     (one key=value per line)
+//	seam=P4  component=...  kind=forward  seq=1  pid=...  call_err=<nil>  at=<RFC3339>
+//
+// call_err is the component's reply for P4 ("<nil>" = it answered successfully) and
+// the fixed text "not_sent" for P2. The directory state/ exists only on a test image,
+// created by hand like the rest of the control directory; if it is absent nothing is
+// written and nothing is reported. The file is written to a temporary name and renamed
+// (an observer never sees a partial file); a failure is one warning and the commit
+// continues. Markers are never removed here, and never go into commit-state.json.
+//
 // The pause is bounded (default 10 s, at most 15 s -- below the 20 s
 // compensation call deadline, so a P4 pause inside the call goroutine cannot
 // turn a success into outcome_unknown) and a hook that cannot work (missing or
@@ -69,6 +83,7 @@ const (
 	hookMaxTimeout     = 15 * time.Second
 	hookPollInterval   = 50 * time.Millisecond
 	hookLogPrefix      = "danos-test-hook:"
+	hookStateDirName   = "state"
 )
 
 type hookSeam string
@@ -86,6 +101,10 @@ type hookIO interface {
 	// OpenFifoNonblock opens path write-only without blocking; it fails with
 	// ENXIO while no reader has the FIFO open.
 	OpenFifoNonblock(path string) (io.WriteCloser, error)
+	// CreateExclusive, Rename and Remove write the seam marker atomically.
+	CreateExclusive(path string, mode os.FileMode) (io.WriteCloser, error)
+	Rename(oldpath, newpath string) error
+	Remove(path string) error
 }
 
 type osHookIO struct{}
@@ -95,6 +114,12 @@ func (osHookIO) ReadFile(p string) ([]byte, error)  { return os.ReadFile(p) }
 func (osHookIO) OpenFifoNonblock(p string) (io.WriteCloser, error) {
 	return os.OpenFile(p, os.O_WRONLY|syscall.O_NONBLOCK, 0)
 }
+
+func (osHookIO) CreateExclusive(p string, mode os.FileMode) (io.WriteCloser, error) {
+	return os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+}
+func (osHookIO) Rename(a, b string) error { return os.Rename(a, b) }
+func (osHookIO) Remove(p string) error    { return os.Remove(p) }
 
 var hookFS hookIO = osHookIO{}
 
@@ -251,9 +276,14 @@ func (h *testHooks) pause(
 		return
 	}
 
+	marker := h.writeMarker(seam, component, kind, seq, callErr)
+
 	extra := ""
+	if marker != "" {
+		extra = " marker=" + marker
+	}
 	if seam == hookP4 {
-		extra = fmt.Sprintf(" callErr=%v", callErr)
+		extra += fmt.Sprintf(" callErr=%v", callErr)
 	}
 	if spec.clamped {
 		extra += " (requested timeout clamped)"
@@ -281,6 +311,97 @@ func (h *testHooks) pause(
 		}
 		h.sleep(hookPollInterval)
 	}
+}
+
+// oneLine makes a value fit on one key=value line.
+func oneLine(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.TrimSpace(s)
+	if len(s) > 400 {
+		s = s[:400] + "..."
+	}
+	return s
+}
+
+// markerName is <seam>-<component>-<seq>.hit with anything outside [A-Za-z0-9._-]
+// replaced, so a component name can never reach outside the state directory.
+func markerName(seam hookSeam, component string, seq uint64) string {
+	safe := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '.', r == '_', r == '-':
+			return r
+		}
+		return '_'
+	}, component)
+	return fmt.Sprintf("%s-%s-%d.hit", seam, safe, seq)
+}
+
+// writeMarker leaves the seam marker and returns its path, or "" when none was
+// written. It never blocks the commit and never returns an error: a missing state
+// directory is silent, any other failure is one warning.
+func (h *testHooks) writeMarker(
+	seam hookSeam,
+	component string,
+	kind schema.DispatchKind,
+	seq uint64,
+	callErr error,
+) string {
+	dir := filepath.Join(h.dir, hookStateDirName)
+	fi, err := h.io.Stat(dir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			h.warnOnce(fmt.Sprintf("marker: cannot stat %s: %s", dir, err))
+		}
+		return ""
+	}
+	if !fi.IsDir() {
+		h.warnOnce(fmt.Sprintf("marker: %s is not a directory", dir))
+		return ""
+	}
+
+	callErrText := "not_sent" // P2: the call has not been made
+	if seam == hookP4 {
+		callErrText = "<nil>"
+		if callErr != nil {
+			callErrText = oneLine(callErr.Error())
+		}
+	}
+	body := fmt.Sprintf("seam=%s\ncomponent=%s\nkind=%s\nseq=%d\npid=%d\ncall_err=%s\nat=%s\n",
+		seam, oneLine(component), oneLine(string(kind)), seq, h.pid, callErrText,
+		h.now().UTC().Format(time.RFC3339))
+
+	name := markerName(seam, component, seq)
+	final := filepath.Join(dir, name)
+	tmp := filepath.Join(dir, "."+name+".tmp")
+	h.io.Remove(tmp) // a leftover from a configd killed in the middle of this very write
+
+	f, err := h.io.CreateExclusive(tmp, 0644)
+	if err != nil {
+		h.warnOnce(fmt.Sprintf("marker: cannot create %s: %s; continuing", tmp, err))
+		return ""
+	}
+	if _, err := f.Write([]byte(body)); err != nil {
+		f.Close()
+		h.io.Remove(tmp)
+		h.warnOnce(fmt.Sprintf("marker: cannot write %s: %s; continuing", tmp, err))
+		return ""
+	}
+	if err := f.Close(); err != nil {
+		h.io.Remove(tmp)
+		h.warnOnce(fmt.Sprintf("marker: cannot close %s: %s; continuing", tmp, err))
+		return ""
+	}
+	if err := h.io.Rename(tmp, final); err != nil {
+		h.io.Remove(tmp)
+		h.warnOnce(fmt.Sprintf("marker: cannot rename %s to %s: %s; continuing", tmp, final, err))
+		return ""
+	}
+	return final
 }
 
 func keyOf(fi os.FileInfo) hookFileKey {
