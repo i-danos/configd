@@ -99,10 +99,22 @@ func (m *CommitMgr) Reconcile(sctx *configd.Context) ([]*exec.Output, error) {
 		return outs, nil
 	}
 
+	// What the component receives keeps the schema defaults: components read
+	// the tree they are given and several reject a document that lacks their
+	// root containers (vrrp: "Error: 'vyatta-interfaces-v1:interfaces'",
+	// kdump: "Error: No kernel crash dump configuration." on an empty one).
 	target := func() datanode.DataNode {
 		return union.NewNode(nil, m.Running(), m.schema, nil, 0)
 	}
-	rep, _ := cm.ComponentReconcile(m.schema, target, list, schema.CompensationPolicy{}, rec, nil)
+	// The same document with defaults left out, used ONLY for the read-back
+	// comparison. A component that has never been configured reports an empty
+	// document -- vrrp answers "{}" -- and comparing that against a payload
+	// carrying its defaulted leaves is what kept it unverified forever (R14).
+	cmpTarget := func() datanode.DataNode {
+		return union.NewDataNodeWithoutDefaults(
+			union.NewNode(nil, m.Running(), m.schema, nil, 0))
+	}
+	rep, _ := cm.ComponentReconcile(m.schema, target, cmpTarget, list, schema.CompensationPolicy{}, rec, nil)
 	for _, r := range rep.Results {
 		if r.Forward == schema.OutcomeApplied &&
 			(r.Verified == schema.VerifyMatched || r.Verified == schema.VerifyNotVerifiable) {
