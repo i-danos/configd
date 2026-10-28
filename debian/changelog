@@ -1,3 +1,16 @@
+configd (2.12.2danos9) unstable; urgency=medium
+
+  * session: reconcile passes a second target to ComponentReconcile --
+    the same configuration with schema defaults stripped -- used only by
+    config's comparison (sameConfigAllowDefaulted, config 1.9danos9).
+    What a component is sent is unchanged; 2.12.2danos8's attempt to send
+    the stripped document directly made vrrp and kdump reject an empty
+    payload outright (reverted here).
+  * Tests: session suite passes unchanged; the comparison itself is
+    covered by config's component_defaults_test.go.
+
+ -- i-danos dev <dev@i-danos.dev>  Wed, 28 Oct 2026 04:30:00 -0700
+
 configd (2.12.2danos8) unstable; urgency=medium
 
   * session: reconcile now builds its FilterSetTree target with
