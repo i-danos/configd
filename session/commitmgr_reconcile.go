@@ -99,8 +99,14 @@ func (m *CommitMgr) Reconcile(sctx *configd.Context) ([]*exec.Output, error) {
 		return outs, nil
 	}
 
+	// Without defaults: FilterSetTree compares this against a component's own
+	// read-back, and a component that has never been configured answers that
+	// with an empty document. If defaulted leaves were included here, a never-
+	// configured component would get sent a non-empty payload it has no way to
+	// echo back, and would be marked unverified forever (R14).
 	target := func() datanode.DataNode {
-		return union.NewNode(nil, m.Running(), m.schema, nil, 0)
+		return union.NewDataNodeWithoutDefaults(
+			union.NewNode(nil, m.Running(), m.schema, nil, 0))
 	}
 	rep, _ := cm.ComponentReconcile(m.schema, target, list, schema.CompensationPolicy{}, rec, nil)
 	for _, r := range rep.Results {
