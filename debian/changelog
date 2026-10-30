@@ -1,3 +1,15 @@
+configd (2.12.2danos10) unstable; urgency=medium
+
+  * Version only: the reconcile fix that forge published as 2.12.2danos10
+    (9e41ce3 upstream target + 62c9646 changelog) was lost with that host; the
+    rebuild on bench landed the same behaviour as 9e23b52 under 2.12.2danos9.
+    Re-issue it as 2.12.2danos10 so the number that is already referenced by
+    the 2026-10-28 evidence maps to a commit that exists, and so a configd
+    binary whose content changed never keeps an older version string.
+  * No source change in this commit; 9e23b52 is what is built.
+
+ -- i-danos dev <dev@i-danos.dev>  Fri, 30 Oct 2026 00:30:00 -0700
+
 configd (2.12.2danos9) unstable; urgency=medium
 
   * session: reconcile passes a second target to ComponentReconcile --
